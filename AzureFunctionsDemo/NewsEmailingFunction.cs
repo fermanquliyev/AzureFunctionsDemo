@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using System.Text;
 using NewsAPI;
 using NewsAPI.Models;
+using NewsAPI.Constants;
 
 namespace AzureFunctionsDemo
 {
@@ -14,7 +15,7 @@ namespace AzureFunctionsDemo
         //<docsnippet_fixed_delay_retry_example>
         [Function(nameof(NewsEmailingFunction))]
         [FixedDelayRetry(5, "00:00:10")]
-        public static async Task Run([TimerTrigger("0 0 8 * * *" // Run every day at 8:00 AM UTC
+        public static async Task Run([TimerTrigger("0 0 11 * * *" // Run every day at 11:00 AM UTC
             #if DEBUG
             , RunOnStartup=true
             #endif
@@ -38,23 +39,39 @@ namespace AzureFunctionsDemo
             var emailClient = new EmailClient(azureCommunicationServicesConnectionString);
             var newsApiClient = new NewsApiClient(newsApiKey);
 
-            var news = await newsApiClient.GetTopHeadlinesAsync(new NewsAPI.Models.TopHeadlinesRequest
-            {
-                Country = NewsAPI.Constants.Countries.US,
-                Category = NewsAPI.Constants.Categories.Business
-            });
+            var categories = new List<Categories> { Categories.Business,
+                Categories.Technology,
+                Categories.Science};
 
-            if (news == null || news.Articles == null || news.Articles.Count == 0)
+            var articles = new List<Article>();
+
+            foreach (var category in categories)
+            {
+                var news = await newsApiClient.GetTopHeadlinesAsync(new TopHeadlinesRequest { Category = category, Country = Countries.US, PageSize = 30, Language = Languages.EN });
+
+                if (news == null || news.Articles == null || news.Articles.Count == 0)
+                {
+                    logger.LogError("No news found for "+category.ToString());
+                }
+                else
+                {
+                    articles.AddRange(news.Articles);
+                }
+            }
+
+            articles = articles.DistinctBy(x=>x.Url).OrderByDescending(article => article.PublishedAt).ToList();
+
+            if(articles.Count == 0)
             {
                 logger.LogError("No news found. Exiting function.");
                 return;
             }
 
-            string emailContent = GenerateEmailContent(news);
+            string emailContent = GenerateEmailContent(articles, categories.Select(x=>x.ToString()).ToList());
 
             var recipients = new EmailRecipients(emailList.Split(',').Select(email => new EmailAddress(email)).ToList());
 
-            if(recipients.To.Count == 0)
+            if (recipients.To.Count == 0)
             {
                 logger.LogError("No recipients found. Exiting function.");
                 return;
@@ -62,7 +79,7 @@ namespace AzureFunctionsDemo
 
             var emailMessage = new EmailMessage(
                 senderAddress: senderAddress,
-                content: new EmailContent("Daily Business News by Farman - Automated")
+                content: new EmailContent($"Daily Business News by Farman - {DateTime.UtcNow.Date.ToShortDateString()}")
                 {
                     PlainText = "Here is your daily business news.",
                     Html = emailContent
@@ -75,15 +92,18 @@ namespace AzureFunctionsDemo
 
             logger.LogInformation("Email sent with subject: {subject}", emailMessage.Content.Subject);
             logger.LogInformation("Email send to: {emailList}", emailList);
-            logger.LogInformation("News sent: {count}", news.Articles.Count);
+            logger.LogInformation("News sent: {count}", articles.Count);
         }
 
-        private static string GenerateEmailContent(ArticlesResult news)
+        private static string GenerateEmailContent(List<Article> news, List<string> tags)
         {
             var emailContent = new StringBuilder();
             emailContent.Append("<html><body>");
             emailContent.Append("<h1>Daily Business News by Farman - Automated Azure Function</h1>");
-            foreach (var article in news.Articles)
+            emailContent.Append("<hr>");
+            emailContent.Append(tags.Count > 0 ? $"<h4>Tags: {string.Join(", ", tags)}</h4>" : "<h3>Tags: Business</h3>");
+            emailContent.Append("<hr>");
+            foreach (var article in news)
             {
                 emailContent.Append($"<h2 style='margin-top:15px'>{article.Title}</h2>");
                 emailContent.Append($"<img style='width:50%' src='{article.UrlToImage}'>");
